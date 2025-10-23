@@ -1,0 +1,113 @@
+%% ===== m=1 CBF (single-integrator) — circle avoidance via QP =====
+% State: x = [x;y], Control: u = [ux;uy], Dynamics: xdot = u
+% Safety: stay outside a circle of radius D around (x0,y0): h(x) >= 0
+clear; clc; close all; rng(0)
+
+% ----- Sim setup -----
+T   = 0.05;                 % sample time (s)
+N   = 800;                  % steps
+x   = [2; -6];              % start (choose outside the obstacle)
+goal = [12; 8];             % target position
+obs.c = [5; 0];  obs.R = 4; % obstacle center & radius D
+k_alpha = 1.0;              % alpha(h) = k*h
+W = eye(2);                 % QP weight (track nominal input)
+use_slack = false;           % slack keeps feasibility if needed
+rho_slack = 1000;           % penalty on slack^2 (only if use_slack)
+
+% input limits
+u_max = 1.2; u_min = -1.2;
+
+% storage
+X = zeros(2,N+1); X(:,1)=x;  U = zeros(2,N);
+
+haveQP = exist('quadprog','file')==2;
+
+for k = 1:N
+    x = X(:,k);
+
+    % ---- nominal goal-seeking input (without safety) ----
+    e = goal - x;
+    u_nom = 1 * e / max(norm(e), 1e-6);    % unit towards goal, scaled
+    u_nom = max(min(u_nom, u_max), u_min);   % saturate
+
+    % ---- CBF ingredients ----
+    dx = x(1)-obs.c(1); dy = x(2)-obs.c(2);
+    h      = dx*dx + dy*dy - obs.R^2;
+    grad_h = [2*dx, 2*dy];             % ∇h
+    alpha  = k_alpha*h;
+    % ----- Sampled-data tightening (Eq. (4)) -----
+    % 2-norm bound on control: ||u|| <= u_bar
+    u_bar = sqrt(2) * u_max;                  % since each component in [-u_max, u_max]
+    grad_norm = norm(grad_h);                 % ||∇h(x_k)|| = 2*||x_k - c||
+    l2 = 2 * u_bar;                           % l2 = l_Lfh + l_Lgh*u_max  (here 0 + 2*u_bar)
+    l1 = (2 * u_bar + k_alpha * grad_norm) * u_bar;   % (l_Lfh + l_Lgh*u_max + l_{α∘h})*Φ
+    
+    Delta_SD = (l1 / max(l2,1e-9)) * (exp(l2*T) - 1); % sampled-data margin
+
+
+    % We need: grad_h * u + alpha >= 0  ->  -grad_h*u <= alpha
+    if ~use_slack
+        A = -grad_h;  b = alpha;       % A(1x2) u(2x1) <= b
+        H = 2*W;  f = -2*W*u_nom;
+        Aqp = [A;  eye(2); -eye(2)];
+        bqp = [b; [u_max;u_max]; -[u_min;u_min]];
+        u = solve_qp(H,f,Aqp,bqp);
+        if isempty(u)                   % fallback: project onto halfspace
+            u = proj_halfspace_box(u_nom, grad_h, -alpha, u_min, u_max);
+        end
+    else
+        % Add slack s >= 0: grad_h*u + alpha >= -s  ->  -grad_h*u - s <= alpha
+        % Decision var w = [u_x; u_y; s]
+        H = blkdiag(2*W, 2*rho_slack);
+        f = [-2*W*u_nom; 0];
+        A = [-grad_h, -1];             % size 1x3
+        b = alpha;
+        Aqp = [A;  eye(3); -eye(3)];
+        bqp = [b;  u_max; u_max;  Inf;  -u_min; -u_min; 0]; % s unconstrained above, >=0 below
+        w = solve_qp(H,f,Aqp,bqp);
+        if isempty(w)
+            % fallback: ignore slack in fallback projection
+            u = proj_halfspace_box(u_nom, grad_h, -alpha, u_min, u_max);
+        else
+            u = w(1:2);
+        end
+    end
+    U(:,k) = u;
+
+    % ---- integrate xdot = u (Euler is enough here) ----
+    X(:,k+1) = X(:,k) + T*u;
+
+    % stop if at goal
+    if norm(X(:,k+1)-goal) < 0.2
+        X = X(:,1:k+1); U = U(:,1:k); break;
+    end
+end
+
+% ---- Plot ----
+figure; hold on; axis equal; grid on
+th = linspace(0,2*pi,256);
+plot(obs.c(1)+obs.R*cos(th), obs.c(2)+obs.R*sin(th),'k--','LineWidth',1.5)
+plot(X(1,:),X(2,:),'-','LineWidth',2)
+plot(goal(1),goal(2),'gx','LineWidth',2)
+xlabel('x'); ylabel('y'); title('m=1 CBF (single-integrator) — circle avoidance')
+
+%% ---------- helpers ----------
+function u = solve_qp(H,f,A,b)
+    opts = optimoptions('quadprog','Display','off');
+    try
+        u = quadprog(H,f,A,b,[],[],[],[],[],opts);
+    catch
+        u = [];
+    end
+end
+
+function u = proj_halfspace_box(u0, grad_h, rhs, umin, umax)
+    % Project u0 onto {u | grad_h*u >= rhs} intersect box [umin,umax]^2
+    % If feasible, keep u0; else move along grad_h to meet boundary.
+    if grad_h*u0(:) >= rhs
+        u = u0;
+    else
+        a = grad_h(:); u = u0 + ((rhs - a.'*u0)/(a.'*a))*a; % project to line
+    end
+    u = max(min(u,umax),umin);
+end

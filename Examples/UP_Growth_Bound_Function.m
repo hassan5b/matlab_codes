@@ -1,0 +1,113 @@
+%% User-provided growth bound function handle for a continuous-time system
+% Used in:
+% - Utilities/Growth_bound_choice.m
+%       for the over-approximation method 2 in
+%       OA_methods/OA_2_CT_Contraction_growth_Bound.m
+
+% The main requirements on its definition for the over-approximation to be 
+% applicable are provided at the end of this file, or in more details in 
+% the paper below.
+
+% Source paper:
+% G. Reissig, A. Weber and M. Rungger, "Feedback refinement relations for 
+% the synthesis of symbolic controllers". IEEE Transactions on Automatic 
+% Control v. 62(4), pp. 1781-1796, 2017. DOI: 10.1109/TAC.2016.2593947
+
+% List of inputs
+%   t_init: initial time
+%   t_final: time at which the reachable set is approximated
+%   [x_low,x_up]: interval of initial states (at time t_init)
+%   [p_low,p_up]: interval of allowed input values
+
+% List of outputs
+%   GB_handle: function handle of the growth bound
+%       inputs: positive time, positive state vector, positive input vector
+%       output: positive state vector (growth or contraction of the system)
+
+% Authors:  
+%   Pierre-Jean Meyer, <pierre-jean.meyer -AT- univ-eiffel.fr>, COSYS-ESTAS, Univ Gustave Eiffel
+%   Alex Devonport, <alex_devonport -AT- berkeley.edu>, EECS, UC Berkeley
+% Date: 2nd of December 2021
+
+function GB_handle = UP_Growth_Bound_Function(t_init,t_final,x_low,x_up,p_low,p_up)
+n_x = length(x_low);
+n_p = length(p_low);
+
+%% Default values as NaN (not a number)
+GB_handle = @(t,x,p) NaN(n_x,1);
+
+%% User-provided growth bound handle
+
+% Requirements on the definition of GB_handle
+% (using componentwise inequalities)
+%   1) GB_handle is a function handle from R+*R+^n_x*R+^n_p to R+^n_x
+% 
+%   2) x>=x', p>=p' => GB_handle(t,x,p)>=GB_handle(t,x',p')
+% 
+%   3) Let x(t_final;t_init,x0,p) be the solution of System_description(t,x,p)
+%   at time t_final, starting from x0 at t_init and with constant input p.
+%   Let x0_c and p_c be the centers of [x_low,x_up] and [p_low,p_up].
+%   Then we need, for all x0 in [x_low,x_up] and p in [p_low,p_up]:
+%   abs(x(t_final;t_init,x0,p)-x(t_final;t_init,x0_c,p_c))
+%       <= GB_handle(t_final-t_init,abs(x0-x0_c),abs(p-p_c))
+
+
+% GB_handle = @(t,x,p) ...
+
+global system_choice
+
+switch system_choice
+        case 99
+        % Unicycle with disturbance on (x,y) — Eq. (11)
+        % x = [x;y;theta;v], p = [u1;u2;d1;d2] (ZOH)
+        % Build a conservative contraction matrix C and input bound p_tilde.
+
+        % --- bounds on v over one step (ZOH) ---
+        Tstep = t_final - t_init;
+        v_lo = x_low(4) + min(0, Tstep * p_low(2));   % u2 = p(2)
+        v_hi = x_up(4)  + max(0, Tstep * p_up(2));
+        v_abs_max = max(abs([v_lo, v_hi]));
+
+        % --- contraction matrix C for |∂f/∂x| upper bounds ---
+        % Nonzero partials for Eq.(11):
+        %   ∂xdot/∂theta = -v sinθ   => |.| ≤ v_abs_max
+        %   ∂xdot/∂v     =  cosθ     => |.| ≤ 1
+        %   ∂ydot/∂theta =  v cosθ   => |.| ≤ v_abs_max
+        %   ∂ydot/∂v     =  sinθ     => |.| ≤ 1
+        C = zeros(length(x_low));
+        C(1,3) = v_abs_max;   C(1,4) = 1;
+        C(2,3) = v_abs_max;   C(2,4) = 1;
+        % (diagonal zeros are fine here)
+
+        % --- input-effect bound p_tilde (maps |p| radii into state rates) ---
+        % p = [u1; u2; d1; d2]
+        p_center = (p_low + p_up)/2;
+        p_rad    = abs(p_up - p_center);   % for your bounds => [1; 2; 0.3; 0.3]
+        % Effects: d1->xdot, d2->ydot, u1->thetadot, u2->vdot
+        p_tilde = [ p_rad(3);   % |d1|
+                    p_rad(4);   % |d2|
+                    p_rad(1);   % |u1|
+                    p_rad(2) ]; % |u2|
+
+        % --- growth bound handle (same structure as case 11) ---
+        GB_handle = @(t, x, p) expm(C*t)*x + ...
+            integral(@(s) expm(C*s)*p_tilde, 0, t, 'ArrayValued', true);
+
+    case 11
+        %% Pursuer-evader game with 2 Dubin's vehicles (continuous-time)
+        
+        % Input influence on dynamics, assuming [p_low,p_up] is centered on 0
+        p_tilde = [0;0;0;p_up(1);p_up(1);p_up(2)];
+
+        % Check Input_files/UP_Jacobian_Bounds.m
+        input_center = (p_low+p_up)/2;
+        [J_x_low,J_x_up,~,~] = UP_Jacobian_Bounds(t_init,t_final,x_low,x_up,input_center,input_center);
+
+        % Contraction matrix
+        C = max(abs(J_x_low),abs(J_x_up));   % Off-diagonal elements: upper bound on the absolute values
+        C(1:n_x+1:end) = diag(J_x_up);       % Diagonal elements: take Jacobian upper bound directly
+
+        % Use this matrix to create a growth bound    
+        GB_handle = @(t,x,p) expm(C*t)*x + integral(@(s) expm(C*s)*p_tilde,0,t,'ArrayValued',true);
+end
+        
