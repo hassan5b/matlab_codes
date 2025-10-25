@@ -6,10 +6,10 @@ clear; clc; close all; rng(0)
 % ---------- fixed scenario ----------
 T = 0.1;                         % sample time
 N = 900;
-obs.c_fun     = @(tt) [32;25];         % o(t)
-obs.cdot_fun  = @(tt) [0;0];           % \dot o(t)
-obs.cddot_fun = @(tt) [0;0];           % \ddot o(t)
-obs.D_fun     = @(tt) 5.0;             % D(t)
+%obs.c_fun     = @(tt) [32;25];         % o(t)
+%obs.cdot_fun  = @(tt) [0;0];           % \dot o(t)
+%obs.cddot_fun = @(tt) [0;0];           % \ddot o(t)
+%obs.D_fun     = @(tt) 5.0;             % D(t)
 obs.Ddot_fun  = @(tt) 0.0;             % \dot D(t)
 obs.Dddot_fun = @(tt) 0.0;             % \ddot D(t)
 
