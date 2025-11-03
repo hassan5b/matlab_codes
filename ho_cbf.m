@@ -6,20 +6,21 @@ clear; clc; close all; rng(0)
 % ---------- fixed scenario ----------
 T = 0.1;                         % sample time
 N = 900;
-obs.c_fun     = @(tt) [32;25];         % o(t)
-obs.cdot_fun  = @(tt) [0;0];           % \dot o(t)
-obs.cddot_fun = @(tt) [0;0];           % \ddot o(t)
-obs.D_fun     = @(tt) 5.0;             % D(t)
-obs.Ddot_fun  = @(tt) 0.0;             % \dot D(t)
-obs.Dddot_fun = @(tt) 0.0;             % \ddot D(t)
+%obs.c_fun     = @(tt) [32;25];         % o(t)
+%obs.cdot_fun  = @(tt) [0;0];           % \dot o(t)
+%obs.cddot_fun = @(tt) [0;0];           % \ddot o(t)
+%obs.D_fun     = @(tt) 5.0;             % D(t)
+%obs.Ddot_fun  = @(tt) 0.0;             % \dot D(t)
+%obs.Dddot_fun = @(tt) 0.0;             % \ddot D(t)
 
 %moving obstacle
-% obs.c_fun     = @(tt) [32 + 0.4*cos(0.1*tt); 25];
-% obs.cdot_fun  = @(tt) [-0.04*sin(0.1*tt); 0];
-% obs.cddot_fun = @(tt) [-0.004*cos(0.1*tt); 0];
-% obs.D_fun     = @(tt) 5 + 0.5*sin(0.05*tt);
-% obs.Ddot_fun  = @(tt) 0.5*0.05*cos(0.05*tt);
-% obs.Dddot_fun = @(tt) -0.5*(0.05)^2*sin(0.05*tt);
+obs.c_fun     = @(tt) [32 + 20*cos(0.3*tt); 25];
+obs.cdot_fun  = @(tt) [-0.1*sin(0.1*tt); 0];
+obs.cddot_fun = @(tt) [-0.004*cos(0.1*tt); 0];
+obs.D_fun     = @(tt) 5 + 2*sin(0.4*tt);
+obs.Ddot_fun  = @(tt) 0.5*0.05*cos(0.05*tt);
+obs.Dddot_fun = @(tt) -0.5*(0.05)^2*sin(0.05*tt);
+
 
 x_true = [5;25;-pi/2;0.8];       % initial state
 goal   = [45;21];
@@ -37,6 +38,8 @@ Z = nan(4, N+1);   % to store measurements
 global system_choice;
 system_choice = 99;
 t=0;
+Viz = initScene(X(:,1), obs, T);   % from the helper I gave
+h_min = +inf;
 
 for k = 1:N
     % --- measurement (x,y noisy; theta,v perfect) ---
@@ -103,8 +106,21 @@ for k = 1:N
 
     X(:,k+1) = x_true;
     Z(:,k+1) = X(:,k+1) + [ (2*rand-1)*epsM; (2*rand-1)*epsM; 0; 0 ];
+    t = k*T;      
+    c = obs.c_fun(t);           % 2x1 vector [cx; cy]
+    D = obs.D_fun(t);
     
-    t=t+T;
+    % --- barrier at current step ---
+    h_curr = (X(1,k+1)-c(1))^2 + (X(2,k+1)-c(2))^2 - D^2;
+    h_min  = min(h_min, h_curr);
+    
+    % --- (optional) compute cycle time if you wrapped tic/toc around TIRA+QP
+    % comp_ms = 1000*toc(t0);
+    comp_ms = 0;                % set to 0 if you didn't time this step
+    
+    % --- update visualization (R_lo/R_hi may be [] if not available) ---
+    updateScene(Viz, X(:,k+1), Z(:,k+1), R_lo, R_hi, obs, t, h_curr, h_min, comp_ms);
+    
 
     if norm(X(1:2,k+1)-goal) < 0.5, X=X(:,1:k+1); U=U(:,1:k); break; end
 end
@@ -195,7 +211,6 @@ function [a, c] = fv_affine_at_TV(x, t, obs)
 end
 
 
-
 function Mk = compute_margin_sup_TV(R_lo, R_hi, xhat, t, obs, umin, umax, gamma)
 % Paper-faithful Eq. (12):
 % margin = sup_{x∈R, u∈U, d∈P} [ fv(x,u) - fv(xhat,u) + f_d(x,d) ]
@@ -270,7 +285,6 @@ function u0 = Kperf_MPC(x0, goal, umin, umax, T)
     u0   = Uopt(1:2);
 end
 
-
 function xnext = rk4_unicycle(x, u, T)
     f  = @(x)[ x(4)*cos(x(3)); x(4)*sin(x(3)); 0; 0 ];
     G  = [0 0; 0 0; 1 0; 0 1];
@@ -292,4 +306,71 @@ function lFt = tv_time_lipschitz(xhat, t, obs)
     lFt = abs(c1 - c0)/dt;
 end
 
+function H = initScene(x0, obs, T)
+    figure('Color','w'); hold on; axis equal; grid on
+    xlim([0, 60]); ylim([0, 50]);
+    xlabel('x [m]'); ylabel('y [m]');
+    title('Unicycle — robust SD-HOCBF (Eq. 12)')
+
+    % obstacle (will update every step)
+    th = linspace(0,2*pi,200);
+    H.th = th;
+    co = obs.c_fun(0); D = obs.D_fun(0);
+    H.obs = plot(co(1)+D*cos(th), co(2)+D*sin(th),'k--','LineWidth',1.5);
+
+    % paths
+    H.path_true = animatedline('LineWidth',1.6,'Color',[0 0 0]);
+    H.path_meas = animatedline('LineWidth',1.0,'Color',[0.6 0.6 0.6]);
+
+    % robot glyph
+    [vx,vy] = triangle_pose(x0(1), x0(2), x0(3), 0.7);
+    H.rob = patch('XData',vx,'YData',vy,'FaceColor',[0.2 0.6 1],...
+                  'EdgeColor','k','LineWidth',1);
+
+    % TIRA (x,y) rectangle (translucent)
+    H.tira = patch('XData',[],'YData',[],'FaceColor',[1 0.6 0],...
+                   'FaceAlpha',0.2,'EdgeColor',[1 0.4 0],'LineWidth',1);
+
+    % HUD text
+    H.txt = text(1,49,sprintf('t=%.1f  h=%.2f  min h=%.2f  comp=%.0f ms',0,NaN,NaN,0),...
+                 'FontName','Consolas','FontSize',10,'VerticalAlignment','top');
+
+    drawnow;
+end
+
+function updateScene(H, x_true, z_meas, R_lo, R_hi, obs, t, h_curr, h_min, comp_ms)
+    % obstacle
+    c = obs.c_fun(t); D = obs.D_fun(t);
+    set(H.obs,'XData',c(1)+D*cos(H.th),'YData',c(2)+D*sin(H.th));
+
+    % paths
+    addpoints(H.path_true, x_true(1), x_true(2));
+    if ~isempty(z_meas)
+        addpoints(H.path_meas, z_meas(1), z_meas(2));
+    end
+
+    % robot glyph
+    [vx,vy] = triangle_pose(x_true(1), x_true(2), x_true(3), 0.7);
+    set(H.rob,'XData',vx,'YData',vy);
+
+    % TIRA endpoint set projected on (x,y)
+    if ~isempty(R_lo) && ~isempty(R_hi)
+        Xr = [R_lo(1) R_hi(1) R_hi(1) R_lo(1)];
+        Yr = [R_lo(2) R_lo(2) R_hi(2) R_hi(2)];
+        set(H.tira,'XData',Xr,'YData',Yr);
+    end
+
+    % HUD
+    set(H.txt,'String',sprintf('t=%.1f  h=%.2f  min h=%.2f  comp=%d ms', ...
+        t, h_curr, h_min, round(comp_ms)));
+
+    drawnow limitrate
+end
+
+function [vx,vy] = triangle_pose(x, y, th, s)
+    tri = s * [ 1  0 -0.6; 0  0.3 -0.3 ];
+    R = [cos(th) -sin(th); sin(th) cos(th)];
+    pts = R*tri + [x; y];
+    vx = pts(1,:); vy = pts(2,:);
+end
 
