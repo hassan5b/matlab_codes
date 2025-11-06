@@ -14,12 +14,13 @@ N = 900;
 %obs.Dddot_fun = @(tt) 0.0;             % \ddot D(t)
 
 %moving obstacle
-obs.c_fun     = @(tt) [32 + 20*cos(0.3*tt); 25];
-obs.cdot_fun  = @(tt) [-0.1*sin(0.1*tt); 0];
-obs.cddot_fun = @(tt) [-0.004*cos(0.1*tt); 0];
-obs.D_fun     = @(tt) 5 + 2*sin(0.4*tt);
-obs.Ddot_fun  = @(tt) 0.5*0.05*cos(0.05*tt);
-obs.Dddot_fun = @(tt) -0.5*(0.05)^2*sin(0.05*tt);
+obs.c_fun     = @(t) [32 + 25*cos(0.3*t); 25];
+obs.cdot_fun  = @(t) [-25*0.3*sin(0.3*t); 0];      % = [-7.5*sin(0.3*t); 0]
+obs.cddot_fun = @(t) [-25*(0.3^2)*cos(0.3*t); 0];  % = [-2.25*cos(0.3*t); 0]
+
+obs.D_fun     = @(t) 5 + 2*sin(0.4*t);
+obs.Ddot_fun  = @(t) 2*0.4*cos(0.4*t);             % = 0.8*cos(0.4*t)
+obs.Dddot_fun = @(t) -2*(0.4^2)*sin(0.4*t);        % = -0.32*sin(0.4*t)
 
 
 x_true = [5;25;-pi/2;0.8];       % initial state
@@ -373,4 +374,3 @@ function [vx,vy] = triangle_pose(x, y, th, s)
     pts = R*tri + [x; y];
     vx = pts(1,:); vy = pts(2,:);
 end
-
