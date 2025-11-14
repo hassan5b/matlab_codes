@@ -25,6 +25,8 @@ beta     = 0.6;     % safety factor on T_max (0<beta<=1)
 Tmin     = 0.02;    % lower bound [s]  (>= solver time + a little margin)
 Tmax_hw  = 0.12;    % upper bound [s]  (hardware/OS cap)
 deltaRT  = 0.005;   % guard over solver time [s]
+g_release = 8.0;        % margin threshold to skip bisection
+grow_max  = 1.35;       % cap per-step growth (35%)
 
 X = zeros(4,N+1); X(:,1)=x_true; 
 U = zeros(2,N);
@@ -32,7 +34,7 @@ Z = nan(4, N+1);   % to store measurements
 T_log     = zeros(1,N);     % T_k each step
 dT_log    = zeros(1,N);     % absolute change ΔT_k = T_k - T_{k-1}
 dTpct_log = zeros(1,N);     % percent change 100*ΔT_k/T_{k-1}
-
+t=0;
 global system_choice;
 system_choice = 99;
 
@@ -63,17 +65,11 @@ for k = 1:N
 
     % --- compute the margin M_k = sup_{x∈R,u∈U,d∈P} margin ---
     % Build margin pieces for this step
-    [Mk_sup, coeff] = compute_margin_sup(R_lo, R_hi, xhat, obs.c, D, u_min, u_max, gamma, params);
+    Mk_sup = compute_margin_sup(R_lo, R_hi, xhat, obs.c, D, u_min, u_max, gamma);
     
-         % ---------- pick a conservative T for the QP margin ----------
-    T_qp = Tmax_hw;
-    
-    % Build the margin used INSIDE the QP:
-    % Mk_qp = Mk_sup + L_u_max * ( eps + Theta * T_qp )
-    Mk_qp = Mk_sup + coeff.Lu_max * (coeff.eps + coeff.Theta * T_qp);
-    
-    % ---------- QP solve ----------
-    A = -a_hat;    b = (c_hat - Mk_qp);
+    Mk = Mk_sup;                 % Eq.(12) margin from TIRA for current T
+    A  = -a_hat; 
+    b  = (c_hat - Mk);
     H = 2*W;       f = -2*W*u_perf;
     Aqp = [A;  eye(2); -eye(2)];
     bqp = [b;  u_max;   -u_min];
@@ -84,36 +80,43 @@ for k = 1:N
     solve_time_k = toc(tStart);
     if isempty(u) || flag<=0, u = max(min(u_perf,u_max),u_min); end
     U(:,k) = u;
-    
-    % ---------- closed-form T_k from the SAME pieces ----------
-    A0 = a_hat*u + c_hat;   % disturbance already packed in Mk_sup
+    g_now = a_hat*u + c_hat - Mk;
 
-    
-    % (Optionally tighten L with ||u||; else use Lu_max)
-    if isfield(coeff,'l_Lfpsi')
-        L_u = coeff.l_Lfpsi + coeff.l_alpha_psi + coeff.l_Lgpsi*norm(u);
+    % ---------- self-triggered update of T_k (for next step) ----------
+    % We look for the largest T in [Tmin, Tmax_hw] such that
+    %   a_hat*u + c_hat - Mk(T) - lFt*T >= 0
+    % using the current u, xhat, and time t.
+    if g_now > g_release
+        T_next = min(Tmax_hw, max(Tmin, min(grow_max*T, Tmax_hw)));
+        T_log(k)   = T_next;
     else
-        L_u = coeff.Lu_max;
-    end
     
-    % T_raw = [A0 - (Mk_sup + L_u*eps)] / [L_u * Theta]
-    num   = A0 - (Mk_sup + L_u*coeff.eps);
-    den   = max(L_u*coeff.Theta, 1e-12);
-    T_raw = num / den;
+        % 1) check feasibility at Tmin
+        if feasible_at_TI(Tmin, xhat, u, a_hat, c_hat, obs.c, D, ...
+                          u_min, u_max, gamma, epsM)
+            % 2) bisection on [Tmin, Tmax_hw]
+            T_lo = Tmin;
+            T_hi = Tmax_hw;
+            for it = 1:8   % 8 iterations is usually plenty
+                T_mid = 0.5*(T_lo + T_hi);
+                if feasible_at_TI(T_mid, xhat, u, a_hat, c_hat, obs.c, D, ...
+                                  u_min, u_max, gamma, epsM)
+                    % still safe at T_mid -> try longer hold
+                    T_lo = T_mid;
+                else
+                    % unsafe at T_mid -> shorten
+                    T_hi = T_mid;
+                end
+            end
+            T_next = beta * T_lo;   % safety factor
+        else
+            % cannot even guarantee Tmin with this u -> clamp to Tmin
+            T_next = Tmin;
+        end
     
-    % guards
-    T = beta * T_raw;                      % e.g., 0.7
-    T = min(max(T, Tmin), Tmax_hw);
-    T = max(T, solve_time_k + deltaRT);
-        
-    % ---------- logging ----------
-    if k == 1
-        T_log(k)     = T;   dT_log(k)    = 0;   dTpct_log(k) = 0;
-    else
-        dT           = T - T_log(k-1);
-        T_log(k)     = T;
-        dT_log(k)    = dT;
-        dTpct_log(k) = 100 * dT / T_log(k-1);
+        % clip and log
+        T_next     = min(max(T_next, Tmin), Tmax_hw);
+        T_log(k)   = T_next;
     end
 
     % ---------- propagate TRUE plant: RK4 + ZOH (Eq. 11) ----------
@@ -128,14 +131,13 @@ for k = 1:N
     k3r = dyn(x_true + 0.5*T*k2r);
     k4r = dyn(x_true + T*k3r);
     x_true = x_true + (T/6)*(k1r + 2*k2r + 2*k3r + k4r);
-    
-    
 
     X(:,k+1) = x_true;
     Z(:,k+1) = X(:,k+1) + [ (2*rand-1)*epsM; (2*rand-1)*epsM; 0; 0 ];
+    t = t + T;
+    T = T_next;
 
-
-    if norm(X(1:2,k+1)-goal) < 0.5, X=X(:,1:k+1); U=U(:,1:k); break; end
+    if norm(X(1:2,k+1)-goal) < 1 , X=X(:,1:k+1); U=U(:,1:k); break; end
 end
 
 % ---- plots (after loop) ----
@@ -188,7 +190,7 @@ function [a, c] = fv_affine_at(x, cObs, D, k1, k2)
     a  = [a1, a2];
     c  = Lf2h + 2*Lfh + 2*h;
 end
-function [Mk_sup, coeff] = compute_margin_sup(R_lo, R_hi, xhat, cObs, D, umin, umax, gamma, params)
+function Mk_sup= compute_margin_sup(R_lo, R_hi, xhat, cObs, D, umin, umax, gamma)
     % === your existing sup over the tube (keep this) ===
     [a_hat, c_hat] = fv_affine_at(xhat, cObs, D, 1, 1); %#ok<NASGU>
     sup_all = -inf;
@@ -212,45 +214,12 @@ function [Mk_sup, coeff] = compute_margin_sup(R_lo, R_hi, xhat, cObs, D, umin, u
     end
     Mk_sup = sup_all;  % <- constant tube/disturbance margin (keep)
 
-    % === sampled-data pieces (stepwise) ===
-    if nargin<9 || ~isfield(params,'epsM'), error('pass params.epsM'); end
-    eps_k = sqrt(2) * params.epsM;
-
-    v_box_max = max(abs([R_lo(4), R_hi(4)]));
-    omega_max = max(abs([umin(1), umax(1)]));
-    a_max     = max(abs([umin(2), umax(2)]));
-    s_bar     = sqrt(v_box_max^2 + omega_max^2 + a_max^2);
-
-    corners = [R_lo(1) R_lo(2); R_lo(1) R_hi(2); R_hi(1) R_lo(2); R_hi(1) R_hi(2)];
-    rmax    = max(vecnorm(corners - cObs(:).',2,2));
-    Lp_h_sup = 2*rmax;
-
-    Theta = s_bar + Lp_h_sup*gamma;
-
-    % L(u) bound (use your Lipschitz pieces if you have them; else conservative)
-    if isfield(params,'l_Lfpsi') && isfield(params,'l_alpha_psi') && isfield(params,'l_Lgpsi')
-        umax_norm = norm([max(abs(umin(1)),abs(umax(1))), max(abs(umin(2)),abs(umax(2)))],2);
-        Lu_max = params.l_Lfpsi + params.l_alpha_psi + params.l_Lgpsi*umax_norm;
-    else
-        Lu_max = 1.0; % placeholder; increase if needed
-    end
-
-    % ||L_p psi_1|| at xhat (for A0)
-    dxh = xhat(1)-cObs(1); dyh = xhat(2)-cObs(2); th = xhat(3); v = xhat(4);
-    gx = 2*v*cos(th) + 2*dxh; gy = 2*v*sin(th) + 2*dyh;
-
-    % Pack
-    coeff = struct();
-    coeff.eps      = eps_k;
-    coeff.Theta    = Theta;
-    coeff.Lu_max   = Lu_max;
-    coeff.LpPsi_m1 = hypot(gx, gy);
 end
 
     
 
 function u0 = Kperf_MPC(x0, goal, umin, umax, T)
-    Np = 50;                                   % horizon
+    Np = 70;                                   % horizon
     Qp = 5.0;                                  % stage position weight
     Qf = 400;                                   % terminal position weight
     Rw = diag([0.1, 0.05]);                    % input weight
@@ -291,3 +260,56 @@ function xnext = rk4_unicycle(x, u, T)
     xnext = x + (T/6)*(k1 + 2*k2 + 2*k3 + k4);
 end
 
+function ok = feasible_at_TI(Tcand, xhat, u, a_hat, c_hat, cObs, D, ...
+                             u_min, u_max, gamma, epsM)
+%FEASIBLE_AT_TI  Check if fixed u is safe for a candidate Tcand (time-invariant).
+% Implements the same inequality as in the QP:
+%       a_hat*u + c_hat - Mk(Tcand) >= 0,
+% where Mk(Tcand) is the Eq.(12) margin computed with TIRA and compute_margin_sup.
+
+    % measurement set Z around xhat
+    Z_lo = xhat + [-epsM; -epsM; 0; 0];
+    Z_hi = xhat + [ epsM;  epsM; 0; 0];
+
+    % input/disturbance bounds p = [u1;u2;d1;d2]
+    p_lo = [u_min; -gamma; -gamma];
+    p_hi = [u_max; +gamma; +gamma];
+
+    % reachable tube over [0, Tcand]
+    [R_lo, R_hi] = TIRA([0, Tcand], Z_lo, Z_hi, p_lo, p_hi);
+
+    % margin for this Tcand (time-invariant version)
+    Mk_T = compute_margin_sup_given_u(R_lo, R_hi, xhat, cObs, D, u, gamma);
+    % same inequality as in the QP
+    g_T = a_hat*u + c_hat - Mk_T;
+
+    ok = (g_T >= 0);
+end
+function Mk_u = compute_margin_sup_given_u(R_lo, R_hi, xhat, cObs, D, u, gamma)
+% Sup over the tube using the ACTUAL held input u (no sup over the full box).
+    [a_hat, c_hat] = fv_affine_at(xhat, cObs, D, 1, 1);
+    sup_all = -inf;
+
+    % Coarse but fast grid; increase to 3^4 or 4^4 if needed
+    xs = linspace(0,1,3);                         % 3 points/axis → 81 samples
+    [X1,X2,X3,X4] = ndgrid(xs,xs,xs,xs);
+    gridPts = [X1(:) X2(:) X3(:) X4(:)].';
+
+    for i = 1:size(gridPts,2)
+        r  = gridPts(:,i);
+        x  = R_lo + r.*(R_hi - R_lo);
+
+        [a, c] = fv_affine_at(x, cObs, D, 1, 1);
+        Dc     = c - c_hat;
+        Du     = (a - a_hat) * u;                 % <-- actual input, not sup over U
+
+        % disturbance support (same as before)
+        v = x(4); th = x(3); dx = x(1)-cObs(1); dy = x(2)-cObs(2);
+        c1 = 4*(v*cos(th) + dx);
+        c2 = 4*(v*sin(th) + dy);
+        sup_d = gamma*(abs(c1) + abs(c2)) + 4*gamma^2;
+
+        sup_all = max(sup_all, Dc + Du + sup_d);
+    end
+    Mk_u = sup_all;
+end

@@ -21,7 +21,7 @@ s_bar  = 2.45;           % bound on ||f(x)+g(x)u|| (pick a safe value)
 params = struct();
 params.epsM = epsM;
 params.s_bar = s_bar;
-beta     = 0.007;     % safety factor on T_max (0<beta<=1)
+beta     = 0.6;     % safety factor on T_max (0<beta<=1)
 Tmin     = 0.02;    % lower bound [s]  (>= solver time + a little margin)
 Tmax_hw  = 0.12;    % upper bound [s]  (hardware/OS cap)
 deltaRT  = 0.005;   % guard over solver time [s]
@@ -32,7 +32,7 @@ Z = nan(4, N+1);   % to store measurements
 T_log     = zeros(1,N);     % T_k each step
 dT_log    = zeros(1,N);     % absolute change ΔT_k = T_k - T_{k-1}
 dTpct_log = zeros(1,N);     % percent change 100*ΔT_k/T_{k-1}
-
+t=0;
 global system_choice;
 system_choice = 99;
 
@@ -62,10 +62,12 @@ for k = 1:N
     [R_lo, R_hi] = TIRA([0, T], Z_lo, Z_hi, p_lo, p_hi);   % uses your System_description case=99
 
     % --- compute the margin M_k = sup_{x∈R,u∈U,d∈P} margin ---
-    [Mk, coeff] = compute_margin_sup(R_lo, R_hi, xhat, obs.c, D, u_min, u_max, gamma, params);
+    % Build margin pieces for this step
+    [Mk_sup, coeff] = compute_margin_sup(R_lo, R_hi, xhat, obs.c, D, u_min, u_max, gamma);
     
-    %QP solver
-    A = -a_hat;    b = (c_hat - Mk);
+    Mk = Mk_sup;                 % Eq.(12) margin from TIRA for current T
+    A  = -a_hat; 
+    b  = (c_hat - Mk);
     H = 2*W;       f = -2*W*u_perf;
     Aqp = [A;  eye(2); -eye(2)];
     bqp = [b;  u_max;   -u_min];
@@ -74,43 +76,39 @@ for k = 1:N
     tStart = tic;
     [u,~,flag] = quadprog(H,f,Aqp,bqp,[],[],[],[],[],opts);
     solve_time_k = toc(tStart);
-    
     if isempty(u) || flag<=0, u = max(min(u_perf,u_max),u_min); end
     U(:,k) = u;
-    
-    % A0 = a_hat*u + c_hat - ||L_p psi_{m-1}||*gamma   (your existing pieces)
-    A0 = a_hat*u + c_hat - coeff.LpPsi_m1*gamma;
-    
-    % Prefer tighter L(u_k) if you exposed Lipschitz parts, else fall back to Lu_max
-    if isfield(coeff,'l_Lfpsi')
-        L_u = coeff.l_Lfpsi + coeff.l_alpha_psi + coeff.l_Lgpsi * norm(u);
+    % ---------- self-triggered update of T_k (for next step) ----------
+    % We look for the largest T in [Tmin, Tmax_hw] such that
+    %   a_hat*u + c_hat - Mk(T) - lFt*T >= 0
+    % using the current u, xhat, and time t.
+
+    % 1) check feasibility at Tmin
+    if feasible_at_TI(Tmin, xhat, u, a_hat, c_hat, obs.c, D, ...
+                      u_min, u_max, gamma, epsM)
+        % 2) bisection on [Tmin, Tmax_hw]
+        T_lo = Tmin;
+        T_hi = Tmax_hw;
+        for it = 1:8   % 8 iterations is usually plenty
+            T_mid = 0.5*(T_lo + T_hi);
+            if feasible_at_TI(T_mid, xhat, u, a_hat, c_hat, obs.c, D, ...
+                              u_min, u_max, gamma, epsM)
+                % still safe at T_mid -> try longer hold
+                T_lo = T_mid;
+            else
+                % unsafe at T_mid -> shorten
+                T_hi = T_mid;
+            end
+        end
+        T_next = beta * T_lo;   % safety factor
     else
-        L_u = coeff.Lu_max;  % conservative but OK
-    end
-    
-    eps_k  = coeff.eps;
-    Theta  = coeff.Theta;
-    
-    num = A0 - L_u*eps_k;
-    den = L_u * max(Theta, 1e-12);
-    if num <= 0
-        T = Tmin;
-    else
-        T = beta * (num/den);
-        T = min(max(T, Tmin), Tmax_hw);
-    end
-    T = max(T, solve_time_k + deltaRT);   % causality guard
-    if k == 1
-        T_log(k)     = T;
-        dT_log(k)    = 0;
-        dTpct_log(k) = 0;
-    else
-        dT           = T - T_log(k-1);
-        T_log(k)     = T;
-        dT_log(k)    = dT;
-        dTpct_log(k) = 100 * dT / T_log(k-1);
+        % cannot even guarantee Tmin with this u -> clamp to Tmin
+        T_next = Tmin;
     end
 
+    % clip and log
+    T_next     = min(max(T_next, Tmin), Tmax_hw);
+    T_log(k)   = T_next;
 
 
     % ---------- propagate TRUE plant: RK4 + ZOH (Eq. 11) ----------
@@ -125,12 +123,11 @@ for k = 1:N
     k3r = dyn(x_true + 0.5*T*k2r);
     k4r = dyn(x_true + T*k3r);
     x_true = x_true + (T/6)*(k1r + 2*k2r + 2*k3r + k4r);
-    
-    
 
     X(:,k+1) = x_true;
     Z(:,k+1) = X(:,k+1) + [ (2*rand-1)*epsM; (2*rand-1)*epsM; 0; 0 ];
-
+    t = t + T;
+    T = T_next;
 
     if norm(X(1:2,k+1)-goal) < 0.5, X=X(:,1:k+1); U=U(:,1:k); break; end
 end
@@ -154,12 +151,7 @@ title('Eq.(12) with TIRA margin — unicycle')
 
 figure; plot(1:N, T_log, 'LineWidth',1.5); grid on;
 xlabel('step k'); ylabel('T_k [s]'); title('Sample period');
-xlim([1 100]);                 % show only first 100 on x-axis
-
-figure; stem(2:N, dT_log(2:N), 'filled'); grid on;
-xlabel('step k'); ylabel('\Delta T_k [s]'); title('Change in T');
-xlim([1 100]);                 % show only first 100 on x-axis
-
+xlim([1 100]);                 % show only first 100 on x-axi
 
 k_col     = (1:N).';
 T_col     = T_log(:);                        % Nx1
@@ -190,112 +182,32 @@ function [a, c] = fv_affine_at(x, cObs, D, k1, k2)
     a  = [a1, a2];
     c  = Lf2h + 2*Lfh + 2*h;
 end
-
-%function Mk = compute_margin_sup(R_lo, R_hi, xhat, cObs, D, k1, k2, umin, umax, gamma)
-% M_k = sup_{x∈R,u∈U,d∈P} [ fv(x,u)-fv(xhat,u) + f_d(x,d) ]
-%     = sup_{x∈R} [ Δc(x) + sup_u Δa(x)u ]  + sup_{x∈R,d∈P} f_d(x,d)
-    % precompute at xhat
- %   [a_hat, c_hat] = fv_affine_at(xhat, cObs, D, k1, k2);
-
-    % sampling on the TIRA box (increase M for tighter bound)
-  %  M = 400;
-   % sup1 = -inf;  sup2 = -inf;
-
-    %for i = 1:M
-     %   r = rand(4,1);
-      %  x = R_lo + r.*(R_hi - R_lo);
-
-        % Δc and Δa
-       % [a, c] = fv_affine_at(x, cObs, D, k1, k2);
-        %Dc = c - c_hat;
-        %Da = a - a_hat;
-
-        % sup over u in the input box (componentwise)
-        %uabs = [max(abs(umin(1)),abs(umax(1))), max(abs(umin(2)),abs(umax(2)))];
-        %sup_u = sum(abs(Da).*uabs);
-
-        %sup1 = max(sup1, Dc + sup_u);
-
-        % sup over d in [-gamma,gamma]^2 for f_d(x,d)
-        % f_d(x,d) = 4*v(d1 cosθ + d2 sinθ) + 2(d1^2 + d2^2) + 4(dx d1 + dy d2)
-        %v=x(4); th=x(3); dx=x(1)-cObs(1); dy=x(2)-cObs(2);
-        %c1 = 4*(v*cos(th) + dx);
-        %c2 = 4*(v*sin(th) + dy);
-        %sup_d = gamma*(abs(c1) + abs(c2)) + 4*gamma^2;
-
-        %sup2 = max(sup2, sup_d);
-    %end
-    %Mk = sup1; %+ sup2;
-%end
-function [Mk, coeff] = compute_margin_sup(R_lo, R_hi, xhat, cObs, D, umin, umax, gamma, params)
-% Return the margin coefficients for Mk(T) = Mk_const + Mk_slope * T
-% and useful extras for the T_k rule.
-%
-% Inputs:
-%   R_lo, R_hi : 4x1 lower/upper corners of the reachable box
-%   xhat       : 4x1 state estimate at t_k
-%   cObs       : 2x1 obstacle center
-%   D          : obstacle radius (unused here; keep for consistency)
-%   umin, umax : 2x1 input bounds [omega; a]
-%   gamma      : disturbance bound
-%   params     : struct with at least params.epsM (sensor half-width on x,y)
-%                (optional) params.l_Lfpsi, params.l_alpha_psi, params.l_Lgpsi
-
-    % ---- 0) Sanity on params.epsM ----
-    if nargin < 9 || ~isstruct(params) || ~isfield(params,'epsM')
-        error('compute_margin_sup: pass params.epsM (sensor bound on x,y).');
+function Mk_sup= compute_margin_sup(R_lo, R_hi, xhat, cObs, D, umin, umax, gamma)
+    % === your existing sup over the tube (keep this) ===
+    [a_hat, c_hat] = fv_affine_at(xhat, cObs, D, 1, 1); %#ok<NASGU>
+    sup_all = -inf;
+    M = 256;
+    xs = linspace(0,1,round(M^(1/4)));
+    [X1,X2,X3,X4] = ndgrid(xs,xs,xs,xs);
+    gridPts = [X1(:) X2(:) X3(:) X4(:)].';
+    for i = 1:size(gridPts,2)
+        r = gridPts(:,i);
+        x = R_lo + r.*(R_hi - R_lo);
+        [a, c] = fv_affine_at(x, cObs, D, 1, 1);
+        Dc = c - c_hat;
+        Da = a - a_hat;
+        sup_u = max(Da(1)*umin(1), Da(1)*umax(1)) + ...
+                max(Da(2)*umin(2), Da(2)*umax(2));
+        v = x(4); th = x(3); dx = x(1)-cObs(1); dy = x(2)-cObs(2);
+        c1 = 4*(v*cos(th) + dx);
+        c2 = 4*(v*sin(th) + dy);
+        sup_d = gamma*(abs(c1) + abs(c2)) + 4*gamma^2;
+        sup_all = max(sup_all, Dc + sup_u + sup_d);
     end
-
-    % ---- 1) Measurement bound ε(z_k) from ±epsM on x,y ----
-    eps_k = sqrt(2) * params.epsM;
-
-    % ---- 2) Step-wise s_bar from current box and input limits ----
-    v_box_max = max(abs([R_lo(4), R_hi(4)]));        % state 4 is v
-    omega_max = max(abs([umin(1), umax(1)]));
-    a_max     = max(abs([umin(2), umax(2)]));
-    s_bar     = sqrt(v_box_max^2 + omega_max^2 + a_max^2);
-
-    % ---- 3) Step-wise r_max → ||L_p h||_sup = 2*r_max  (h = (x-c)^2+(y-c)^2-D^2) ----
-    corners = [R_lo(1) R_lo(2);
-               R_lo(1) R_hi(2);
-               R_hi(1) R_lo(2);
-               R_hi(1) R_hi(2)];
-    dxy   = corners - cObs(:).';
-    rmax  = max( sqrt(sum(dxy.^2,2)) );
-    Lp_h_sup = 2 * rmax;
-
-    % ---- 4) Theta = s_bar + ||L_p h||_sup * gamma ----
-    Theta = s_bar + Lp_h_sup * gamma;
-
-    % ---- 5) L(u) bound (use your Lipschitz pieces if provided; else conservative) ----
-    if isfield(params,'l_Lfpsi') && isfield(params,'l_alpha_psi') && isfield(params,'l_Lgpsi')
-        umax_norm = norm([max(abs(umin(1)),abs(umax(1))), ...
-                          max(abs(umin(2)),abs(umax(2)))],2);
-        L_u = params.l_Lfpsi + params.l_alpha_psi + params.l_Lgpsi * umax_norm;
-    else
-        % conservative fallback; tighten later if you have the Lipschitz pieces
-        L_u = 1.0;
-    end
-
-    % ---- 6) Pack coefficients for Mk(T) and T_k rule ----
-    coeff = struct();
-    coeff.eps       = eps_k;           % ε(z_k)
-    coeff.Theta     = Theta;           % s_bar + ||L_p h||_sup * γ
-    coeff.Lu_max    = L_u;             % L(u) bound used in Mk
-    coeff.Mk_const  = L_u * eps_k;     % constant term in Mk(T)
-    coeff.Mk_slope  = L_u * Theta;     % slope     in Mk(T)
-
-    % ---- 7) ||L_p psi_{m-1}(xhat)|| for A0 term (rel.-deg 2 → psi1) ----
-    dx = xhat(1) - cObs(1);   dy = xhat(2) - cObs(2);
-    th = xhat(3);             v  = xhat(4);
-    gx = 2*v*cos(th) + 2*dx;
-    gy = 2*v*sin(th) + 2*dy;
-    coeff.LpPsi_m1 = hypot(gx, gy);
-
-    % ---- 8) Mk numeric (optional): leave empty; caller forms Mk(T) as needed ----
-    Mk = [];  % caller should do: Mk = coeff.Mk_const + coeff.Mk_slope * T;
+    Mk_sup = sup_all;  % <- constant tube/disturbance margin (keep)
 
 end
+
     
 
 function u0 = Kperf_MPC(x0, goal, umin, umax, T)
@@ -340,3 +252,29 @@ function xnext = rk4_unicycle(x, u, T)
     xnext = x + (T/6)*(k1 + 2*k2 + 2*k3 + k4);
 end
 
+function ok = feasible_at_TI(Tcand, xhat, u, a_hat, c_hat, cObs, D, ...
+                             u_min, u_max, gamma, epsM)
+%FEASIBLE_AT_TI  Check if fixed u is safe for a candidate Tcand (time-invariant).
+% Implements the same inequality as in the QP:
+%       a_hat*u + c_hat - Mk(Tcand) >= 0,
+% where Mk(Tcand) is the Eq.(12) margin computed with TIRA and compute_margin_sup.
+
+    % measurement set Z around xhat
+    Z_lo = xhat + [-epsM; -epsM; 0; 0];
+    Z_hi = xhat + [ epsM;  epsM; 0; 0];
+
+    % input/disturbance bounds p = [u1;u2;d1;d2]
+    p_lo = [u_min; -gamma; -gamma];
+    p_hi = [u_max; +gamma; +gamma];
+
+    % reachable tube over [0, Tcand]
+    [R_lo, R_hi] = TIRA([0, Tcand], Z_lo, Z_hi, p_lo, p_hi);
+
+    % margin for this Tcand (time-invariant version)
+    Mk_T = compute_margin_sup(R_lo, R_hi, xhat, cObs, D, u_min, u_max, gamma);
+
+    % same inequality as in the QP
+    g_T = a_hat*u + c_hat - Mk_T;
+
+    ok = (g_T >= 0);
+end
