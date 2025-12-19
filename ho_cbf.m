@@ -44,7 +44,7 @@ for k = 1:N
     xhat = z;
     Z(:,k) = z;
     % --- K_perf: minimal MPC (receding horizon, see function below) ---
-    u_perf = Kperf_MPC(xhat, goal, u_min, u_max, T);
+    u_perf = Kperf_MPC(xhat, goal, u_min, u_max, 0.1);
 
     % --- Eq. (12) pieces at xhat: a_hat*u + c_hat  ---
     [a_hat, c_hat] = fv_affine_at(xhat, obs.c, D, k1, k2);
@@ -217,11 +217,12 @@ function Mk_sup= compute_margin_sup(R_lo, R_hi, xhat, cObs, D, umin, umax, gamma
 end
 
     
-
 function u0 = Kperf_MPC(x0, goal, umin, umax, T)
-    Np = 70;                                   % horizon
+    Np = 70;                                   % horizon [cite: 63]
     Qp = 5.0;                                  % stage position weight
-    Qf = 400;                                   % terminal position weight
+    Qv = 1.0;                                  % <--- NEW: Velocity penalty weight
+    Qf = 400;                                  % terminal position weight
+    Qfv = 100.0;                               % <--- NEW: Terminal velocity weight
     Rw = diag([0.1, 0.05]);                    % input weight
 
     U0 = zeros(2*Np,1);
@@ -231,16 +232,24 @@ function u0 = Kperf_MPC(x0, goal, umin, umax, T)
     function J = cost(U)
         x = x0;
         J = 0;
-        for t = 1:Np
-            u = U(2*t-1:2*t);
-            x = rk4_unicycle(x, u, T);         % roll dynamics one step
+        for k = 1:Np
+            u_k = U(2*k-1:2*k);
+            x = rk4_unicycle(x, u_k, T);
+            
             pos_err = x(1:2) - goal(:);
-            J = J + Qp*(pos_err.'*pos_err) + u.'*Rw*u;   % stage cost
+            vel_val = x(4);                    % Extract velocity v
+            
+            % --- FIXED STAGE COST ---
+            % Penalize position error AND velocity (to encourage slowing down)
+            J = J + Qp*(pos_err.'*pos_err) + Qv*(vel_val^2) + u_k.'*Rw*u_k;
         end
-        % ---------- TERMINAL COST (add here) ----------
-        term_err = x(1:2) - goal(:);           % x is x_{k+Np}
-        J = J + Qf*(term_err.'*term_err);      % terminal position penalty
-        % ---------------------------------------------
+        
+        % --- FIXED TERMINAL COST ---
+        term_err = x(1:2) - goal(:);
+        term_vel = x(4);
+        
+        % Heavily penalize non-zero velocity at the end of the horizon
+        J = J + Qf*(term_err.'*term_err) + Qfv*(term_vel^2); 
     end
 
     opts = optimoptions('fmincon','Display','off','MaxIterations',100,'Algorithm','sqp');
