@@ -113,6 +113,9 @@ hWall.spawn_degrees([xs(5), yB, 0.1], [0, 0, 90]); hWall.set_enable_dynamics(tru
 hWall.spawn_degrees([xs(6), yB, 0.1], [0, 0, 90]); hWall.set_enable_dynamics(true);
 hWall.spawn_degrees([xs(7), yB, 0.1], [0, 0, 90]); hWall.set_enable_dynamics(true);
 
+
+%hWall.spawn_degrees([4, 0, 0.1], [0, 0, 0]); hWall.set_enable_dynamics(true);
+
 % ---- QBot ----
 hQBot = QLabsQBotPlatform(qlabs, verbose);
 

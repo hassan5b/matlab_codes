@@ -63,6 +63,7 @@ function [u, debug] = cbf_step_unicycle(xhat, goal, obs, params)
     % 4) Sampled-data margin M_k over the tube (Eq. 12)
     % -------------------------------------------------------------
     Mk = compute_margin_sup(R_lo, R_hi, xhat, obs.c, obs.D, u_min, u_max, gamma);
+    
     % -------------------------------------------------------------
     % 5) Solve QP: min ||u - u_perf||_W^2
     %     s.t. a_hat*u + c_hat - M_k >= 0   (SD-HOCBF)
@@ -85,7 +86,6 @@ function [u, debug] = cbf_step_unicycle(xhat, goal, obs, params)
     if isempty(u) || flag <= 0
         u = max(min(u_perf, u_max), u_min);
     end
-
     % Optional debug info
     if nargout > 1
         debug.u_perf = u_perf;
