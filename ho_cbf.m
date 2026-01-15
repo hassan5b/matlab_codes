@@ -5,22 +5,37 @@ clear; clc; close all; rng(0)
 
 % ---------- fixed scenario ----------
 T = 0.1;                         % sample time
-N = 900;
-obs.c = [32;25];
-D = 5;       % obstacle center & radius (D)
-x_true = [5;25;-pi/2;0.8];       % initial state
-goal   = [45;21];
+N = 200;
+% Scale (goal x = 45 -> 8 m)
+s = 8/45;
 
-u_min = [-1;-2];  u_max = [1;2]; % box limits (Eq. 11)
-gamma  = 0.3;                    % d_i in [-0.3,0.3]
-epsM   = 0.5;                    % measurement error on x,y
+% Original (grid)
+x0y0_grid = [5; 25];
+
+obs_c_grid = [32; 25];
+goal_grid  = [45; 21];
+
+% Translate in grid so start is (0,0)
+obs.c = s * (obs_c_grid - x0y0_grid);   % = s*[27; 0]  = [4.8; 0] m
+D     = s * 5;                           % = 0.8888889 m
+
+x_true = [0; 0; 0; 0];                   % start at origin after transform
+goal   = s * (goal_grid - x0y0_grid);    % = s*[40; -4] = [7.1111111; -0.7111111] m
+
+u_min = [-1.7825; -3.5];
+u_max = [ 1.7825;  3.5];
+
+gamma = s * 0;                         % = 0.0533333 m (only if gamma is x/y position disturbance)
+epsM  = s * 0;                         % = 0.0888889 m (x/y measurement error)
+
 k1 = 1; k2 = 1;                  % (same as paper)
 W = eye(2);                      % objective weight
 
 X = zeros(4,N+1); X(:,1)=x_true; 
 U = zeros(2,N);
 Z = nan(4, N+1);   % to store measurements
-
+flag_log  = zeros(N,1);
+h_log     = zeros(N,1);
 global system_choice;
 system_choice = 99;
 
@@ -62,6 +77,8 @@ for k = 1:N
     [u,~,flag] = quadprog(H,f,Aqp,bqp,[],[],[],[],[],opts);
     if isempty(u) || flag<=0, u = max(min(u_perf,u_max),u_min); end
     U(:,k) = u;
+    flag_log(k) = flag;
+
 
     % ---------- propagate TRUE plant: RK4 + ZOH (Eq. 11) ----------
     d = gamma*(2*rand(2,1)-1);  % adversarial within bounds
@@ -109,6 +126,8 @@ hvals = dx.^2 + dy.^2 - D^2;
 figure; plot(hvals,'LineWidth',1.8); yline(0,'k--');
 xlabel step; ylabel('h(x)'); title('Barrier over time (should stay ≥ 0)')
 
+figure; plot(flag_log,'LineWidth',1.2); grid on;
+xlabel('k'); ylabel('quadprog exitflag'); title('QP exitflag');
 %% ===== Helper: projection onto halfspace ∩ box (no toolbox) =====
 function [a, c] = fv_affine_at(x, cObs, D, k1, k2)
 % a(x) = L_g L_f h(x) (1x2 row),  c(x) = L_f^2 h + 2 L_f h + 2 h  (Eq. 12)

@@ -1,4 +1,4 @@
-function [u, debug] = cbf_step_unicycle(xhat, goal, obs, params)
+function [u, debug,u_perf1,a_hat1,c_hat1,Mk1,A1,b1,R_lo1,R_hi1] = cbf_step_unicycle(xhat, goal, obs, params)
 % One-step SD-HOCBF controller for the unicycle system
 % ... (rest of the function body and subfunctions) ...
 % One-step SD-HOCBF controller for the unicycle system (relative degree 2)
@@ -18,7 +18,7 @@ function [u, debug] = cbf_step_unicycle(xhat, goal, obs, params)
 %            .epsM   measurement noise bound on x,y
 %            .W      2x2 weight matrix in QP
 %
-% u      : 2x1 safe input [u1; u2]
+% u      : 2x1 safe input [u1; u2],
 % debug  : struct with some extra info (optional)
 
     % You still need System_description case 99 set up for TIRA
@@ -88,14 +88,15 @@ function [u, debug] = cbf_step_unicycle(xhat, goal, obs, params)
     end
     % Optional debug info
     if nargout > 1
-        debug.u_perf = u_perf;
-        debug.a_hat  = a_hat;
-        debug.c_hat  = c_hat;
-        debug.Mk     = Mk;
-        debug.A      = A;
-        debug.b      = b;
-        debug.R_lo   = R_lo;
-        debug.R_hi   = R_hi;
+        debug=flag;
+        u_perf1 = u_perf;
+        a_hat1  = a_hat;
+        c_hat1  = c_hat;
+        Mk1     = Mk;
+        A1      = A;
+        b1      = b;
+        R_lo1   = R_lo;
+        R_hi1   = R_hi;
     end
 end
 

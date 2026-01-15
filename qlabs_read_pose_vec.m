@@ -1,5 +1,5 @@
 function y = qlabs_read_pose_vec(reset)
-% y = [x; y; th; valid]  (4x1)
+% y = [x; y; th]  (3x1)
 
 hQBot = evalin('base','hQBot');
 
@@ -26,5 +26,5 @@ end
 x = xw - x0;
 yy = yw - y0;
 
-y = [x; yy; thw; 1];
+y = [x; yy; thw];
 end
