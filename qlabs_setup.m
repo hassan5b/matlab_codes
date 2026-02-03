@@ -27,7 +27,9 @@ try
 catch error
 end
 pause(1)
-
+goal = [7; -1];      % example
+obs_c = [4; 0.5]; % example
+obs_D = 0.5;       % example
 % QLab connection
 qlabs = QuanserInteractiveLabs();
 connection_established = qlabs.open('localhost');
@@ -114,7 +116,26 @@ hWall.spawn_degrees([xs(6), yB, 0.1], [0, 0, 90]); hWall.set_enable_dynamics(tru
 hWall.spawn_degrees([xs(7), yB, 0.1], [0, 0, 90]); hWall.set_enable_dynamics(true);
 
 
-hWall.spawn_degrees([4, 0, 0.1], [0, 0, 0]); hWall.set_enable_dynamics(true);
+%xhWall.spawn_degrees([4, 0, 0.1], [0, 0, 0]); hWall.set_enable_dynamics(true);
+
+% ----- obstacle----
+global hObs OB_ACTOR OB_SCALE OB_Z;
+
+hObs = QLabsBasicShape(qlabs);
+
+OB_ACTOR = 200;                 % choose an unused actor number
+OB_Z     = 0.25;                % height above ground
+OB_SCALE = [0.75 0.75 0.25];     % visual diameter in x/y, height in z
+
+% initial obstacle position in WORLD frame
+obs0_world = [4, 1, OB_Z];   % set these based on your map offset handling
+rot0_deg   = [0 0 0];
+
+% Pick the shape you want to visualize (sphere is usually best for a circle)
+cfg = QLabsBasicShape.SHAPE_SPHERE;        % or SHAPE_CYLINDER :contentReference[oaicite:1]{index=1}
+
+hObs.spawn_id_degrees(OB_ACTOR, obs0_world, rot0_deg, OB_SCALE, cfg, true);
+
 
 % ---- QBot ----
 hQBot = QLabsQBotPlatform(qlabs, verbose);
