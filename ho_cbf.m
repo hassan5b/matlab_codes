@@ -23,7 +23,7 @@ obs.Ddot_fun  = @(t) 2*0.4*cos(0.4*t);             % = 0.8*cos(0.4*t)
 obs.Dddot_fun = @(t) -2*(0.4^2)*sin(0.4*t);        % = -0.32*sin(0.4*t)
 
 
-x_true = [5;25;-pi/2;0.8];       % initial state
+x_true = [5;25;0;0];       % initial state
 goal   = [45;21];
 
 u_min = [-1;-2];  u_max = [1;2]; % box limits (Eq. 11)
