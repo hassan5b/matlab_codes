@@ -21,14 +21,18 @@ T = 0.1;                         % initial sample time (will vary online)
 T_mpc = 0.1;                     % MPC discretization (kept constant)
 N = 900;
 
-% ---------- moving obstacle (same as TV code) ----------
-obs.c_fun     = @(t) [32 + 25*cos(0.3*t); 25];
-obs.cdot_fun  = @(t) [-25*0.3*sin(0.3*t); 0];      % = [-7.5*sin(0.3*t); 0]
-obs.cddot_fun = @(t) [-25*(0.3^2)*cos(0.3*t); 0];  % = [-2.25*cos(0.3*t); 0]
+% ---------- static obstacle ----------
+c0 = [32; 25];     % center
+D0 = 5;            % radius
 
-obs.D_fun     = @(t) 5 + 2*sin(0.4*t);
-obs.Ddot_fun  = @(t) 2*0.4*cos(0.4*t);             % = 0.8*cos(0.4*t)
-obs.Dddot_fun = @(t) -2*(0.4^2)*sin(0.4*t);        % = -0.32*sin(0.4*t)
+obs.c_fun     = @(t) c0;
+obs.cdot_fun  = @(t) [0;0];
+obs.cddot_fun = @(t) [0;0];
+
+obs.D_fun     = @(t) D0;
+obs.Ddot_fun  = @(t) 0;
+obs.Dddot_fun = @(t) 0;
+
 
 % ---------- robot + controller setup ----------
 x_true = [5;25;0;0];       % initial state
