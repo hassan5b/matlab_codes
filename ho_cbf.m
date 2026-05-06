@@ -1,27 +1,39 @@
-%% ===== Four-approach comparison in one run + t = 5.3 snapshots =====
-% Approaches:
-% 1) Original SD baseline, c = c_TI only
-% 2) Igarashi-style TV reciprocal HOCBF-ZOH baseline
-% 3) Corrected TV SD-HOCBF, fixed T
-% 4) Corrected TV SD-HOCBF, variable T
+%% ===== Four-approach comparison + fixed-T sweep + full-run metrics =====
+% Approaches included in this run:
+% 1) Original SD baseline, c = c_TI only, T = 0.1
+% 2) Igarashi-style TV reciprocal HOCBF-ZOH baseline, T = 0.1
+% 3) Corrected TV SD-HOCBF, fixed T = 0.020
+% 4) Corrected TV SD-HOCBF, fixed T = 0.100
+% 5) Corrected TV SD-HOCBF, fixed T = 0.120
+% 6) Corrected TV SD-HOCBF, variable T
 %
 % Required external dependencies:
 % - TIRA and your System_description case system_choice = 99
 % - Optimization Toolbox: quadprog, fmincon
 %
 % Output figures:
-% - Full trajectory comparison
-% - Barrier comparison
-% - Snapshot at t = 5.3 with color + line style only
-% - Thin black Z-paths overlaid for each approach
+% - Full trajectory comparison over the complete rollout
+% - Barrier comparison over the complete rollout
+% - One snapshot at t = 5.3 with color + line style only
+% - Thin black disturbed/measured paths Z overlaid on the snapshot
+%
+% Output tables printed in the command window:
+% - updates, average sampling interval, control effort, path length,
+%   RMS trajectory deviation versus the fixed T = 0.020 TV SD-HOCBF reference
+% - update reduction of variable-T versus fixed T = 0.020, 0.100, and 0.120
 
 clear; clc; close all; rng(0)
 
 %% ===================== Shared scenario =====================
-T_fixed = 0.1;
-T_mpc   = 0.1;
-N       = 900;
-t_snap  = 5.3;
+T_main  = 0.1;      % original baselines and variable-T initial value
+T_mpc   = 0.1;      % MPC discretization kept fixed, as in your previous script
+t_snap  = 5.3;      % snapshot time only, not the metrics horizon
+
+% Full-run horizon. Each controller runs until it reaches the goal or this
+% maximum physical time is exhausted. Metrics are computed on the full result.
+max_sim_time = 90;  % matches the old N = 900, T = 0.1 rollout length
+
+fixed_T_sweep = [0.020, 0.100, 0.120];
 
 obs.c_fun     = @(t) [32 + 25*cos(0.3*t); 25];
 obs.cdot_fun  = @(t) [-25*0.3*sin(0.3*t); 0];
@@ -31,8 +43,7 @@ obs.D_fun     = @(t) 5 + 2*sin(0.4*t);
 obs.Ddot_fun  = @(t) 2*0.4*cos(0.4*t);
 obs.Dddot_fun = @(t) -2*(0.4^2)*sin(0.4*t);
 
-% Use one shared initial condition so the four approaches are comparable.
-% Change this to [5;25;0;0] if you want to match the other TV-only scripts exactly.
+% Use one shared initial condition so all approaches are comparable.
 x0   = [5;25;-pi/2;0.8];
 goal = [45;21];
 
@@ -56,75 +67,98 @@ varpar.g_release = 8.0;
 varpar.grow_max  = 1.35;
 
 export_figures = false;
+export_tables  = false;
 
 %% ===================== Shared randomness =====================
-% All four approaches receive the same noise and disturbance sequences by step index.
-meas_noise = zeros(4, N+1);
-dist_seq   = zeros(2, N);
+% All approaches receive the same measurement-noise and disturbance sequences
+% by controller-update index. Allocate enough samples for the smallest fixed T.
+T_min_for_budget = min([fixed_T_sweep, varpar.Tmin, T_main]);
+N_budget = ceil(max_sim_time/T_min_for_budget) + 20;
 
-for k = 1:N+1
+meas_noise = zeros(4, N_budget+1);
+dist_seq   = zeros(2, N_budget);
+
+for k = 1:N_budget+1
     meas_noise(:,k) = [(2*rand-1)*epsM;
                        (2*rand-1)*epsM;
                        0;
                        0];
 end
 
-for k = 1:N
+for k = 1:N_budget
     dist_seq(:,k) = gamma*(2*rand(2,1)-1);
 end
 
-%% ===================== Run all four approaches =====================
+%% ===================== Run all approaches =====================
 global system_choice;
 system_choice = 99;
 
-fprintf('\nRunning 1/4: original SD baseline...\n');
-res(1) = run_original_sd_baseline(x0, goal, obs, T_fixed, N, ...
-    u_min, u_max, gamma, epsM, W, meas_noise, dist_seq);
-res(1).name = 'Original SD';
+res = repmat(make_result(zeros(4,1), zeros(2,0), zeros(4,1), 0, 0), 1, 6);
 
-fprintf('\nRunning 2/4: Igarashi-style TV reciprocal baseline...\n');
-res(2) = run_igarashi_baseline(x0, goal, obs, T_fixed, N, ...
+fprintf('\nRunning 1/6: original SD baseline, T = %.3f...\n', T_main);
+N_main = ceil(max_sim_time/T_main);
+tmp = run_original_sd_baseline(x0, goal, obs, T_main, N_main, ...
+    u_min, u_max, gamma, epsM, W, meas_noise, dist_seq);
+tmp.name = sprintf('Original SD, T=%.3f', T_main);
+res(1) = tmp;
+
+fprintf('\nRunning 2/6: Igarashi-style TV reciprocal baseline, T = %.3f...\n', T_main);
+tmp = run_igarashi_baseline(x0, goal, obs, T_main, N_main, ...
     u_min, u_max, gamma, epsM, ig, meas_noise, dist_seq);
-res(2).name = 'Igarashi TV reciprocal';
+tmp.name = sprintf('Igarashi TV reciprocal, T=%.3f', T_main);
+res(2) = tmp;
 
-fprintf('\nRunning 3/4: corrected TV fixed-T SD-HOCBF...\n');
-res(3) = run_tv_fixed_baseline(x0, goal, obs, T_fixed, T_mpc, N, ...
-    u_min, u_max, gamma, epsM, W, meas_noise, dist_seq);
-res(3).name = 'TV SD-HOCBF fixed T';
+fixed_tv_indices = 3:5;
+for j = 1:numel(fixed_T_sweep)
+    Tj = fixed_T_sweep(j);
+    idx_res = fixed_tv_indices(j);
+    Nj = ceil(max_sim_time/Tj);
+    fprintf('\nRunning %d/6: corrected TV fixed-T SD-HOCBF, T = %.3f...\n', idx_res, Tj);
+    tmp = run_tv_fixed_baseline(x0, goal, obs, Tj, T_mpc, Nj, ...
+        u_min, u_max, gamma, epsM, W, meas_noise, dist_seq);
+    tmp.name = sprintf('TV SD-HOCBF fixed T=%.3f', Tj);
+    res(idx_res) = tmp;
+end
 
-fprintf('\nRunning 4/4: corrected TV variable-T SD-HOCBF...\n');
-res(4) = run_tv_variable_baseline(x0, goal, obs, T_fixed, T_mpc, N, ...
+variable_idx = 6;
+N_var = ceil(max_sim_time/varpar.Tmin) + 20;
+fprintf('\nRunning 6/6: corrected TV variable-T SD-HOCBF...\n');
+tmp = run_tv_variable_baseline(x0, goal, obs, T_main, T_mpc, N_var, ...
     u_min, u_max, gamma, epsM, W, varpar, meas_noise, dist_seq);
-res(4).name = 'TV SD-HOCBF variable T';
+tmp.name = 'TV SD-HOCBF variable T';
+res(variable_idx) = tmp;
 
-%% ===================== Summary =====================
-fprintf('\n==================== SUMMARY ====================\n');
-for i = 1:numel(res)
-    fprintf('%s:\n', res(i).name);
-    fprintf('  min h(x,t)     = %.4f\n', min(res(i).h));
-    fprintf('  final distance = %.4f\n', norm(res(i).X(1:2,end)-goal));
-    fprintf('  updates        = %d\n', size(res(i).U,2));
-    if isfield(res(i), 'psi1') && ~isempty(res(i).psi1)
-        fprintf('  min psi1       = %.4f\n', min(res(i).psi1));
-    end
-    if isfield(res(i), 'T_log') && ~isempty(res(i).T_log)
-        fprintf('  T range        = [%.4f, %.4f]\n', min(res(i).T_log), max(res(i).T_log));
-    end
+% Do not truncate here: the tables below use each complete rollout.
+
+%% ===================== Metrics and command-window report =====================
+ref_idx = 3;  % fixed T = 0.020 is the high-rate TV SD-HOCBF reference
+[summary_table, reduction_table] = build_comparison_tables(res, ref_idx, fixed_tv_indices, variable_idx, goal);
+
+fprintf('\n==================== SUMMARY METRICS ====================\n');
+disp(summary_table);
+
+fprintf('\n===== VARIABLE-T UPDATE REDUCTION VS FIXED-T TV SD-HOCBF =====\n');
+disp(reduction_table);
+
+if export_tables
+    writetable(summary_table, 'summary_metrics_four_approaches_plus_fixedT_sweep.csv');
+    writetable(reduction_table, 'variableT_update_reduction_vs_fixedT.csv');
 end
 
 %% ===================== Styling =====================
 colors = [0.000 0.447 0.741;   % blue
           0.850 0.325 0.098;   % orange
           0.466 0.674 0.188;   % green
-          0.494 0.184 0.556];  % purple
+          0.494 0.184 0.556;   % purple
+          0.635 0.078 0.184;   % dark red
+          0.301 0.745 0.933];  % light blue
 
-line_styles = {'-', '--', ':', '-.'};
-markers     = {'o', 's', '^', 'd'};
+line_styles = {'-', '--', ':', '-.', '-', '--'};
 
 %% ===================== Full path comparison =====================
 fig_full = figure('Color','w'); hold on; axis equal; grid on
 xlabel('x [m]'); ylabel('y [m]');
-title('Full trajectory comparison');
+title('Trajectory comparison over complete rollout');
 
 for i = 1:numel(res)
     plot(res(i).X(1,:), res(i).X(2,:), ...
@@ -132,21 +166,20 @@ for i = 1:numel(res)
         'DisplayName', res(i).name);
 end
 
-plot(x0(1), x0(2), 'ko', 'MarkerSize', 7, 'LineWidth', 1.5, 'HandleVisibility','off');
 plot(goal(1), goal(2), 'kx', 'MarkerSize', 10, 'LineWidth', 2.0, 'HandleVisibility','off');
 
 th = linspace(0,2*pi,250);
-max_t = max(arrayfun(@(r) r.time(end), res));
-for tt = linspace(0, max_t, 7)
+max_t_plot = max(arrayfun(@(r) r.time(end), res));
+for tt = linspace(0, max_t_plot, 5)
     c = obs.c_fun(tt);
     D = obs.D_fun(tt);
     plot(c(1)+D*cos(th), c(2)+D*sin(th), 'k--', 'LineWidth', 0.9, 'HandleVisibility','off');
 end
-legend('Location','best');
+legend('Location','eastoutside');
 xlim([0,60]); ylim([0,50]);
 
 if export_figures
-    exportgraphics(fig_full, 'full_trajectory_four_approaches.png', 'Resolution', 300);
+    exportgraphics(fig_full, 'trajectory_comparison_with_fixedT_sweep.png', 'Resolution', 300);
 end
 
 %% ===================== Barrier comparison =====================
@@ -158,14 +191,14 @@ for i = 1:numel(res)
 end
 yline(0, 'k--', 'LineWidth', 1.2, 'HandleVisibility','off');
 xlabel('time [s]'); ylabel('h(x,t)');
-title('Barrier comparison');
-legend('Location','best');
+title('Barrier comparison over complete rollout');
+legend('Location','eastoutside');
 
 if export_figures
-    exportgraphics(fig_h, 'barrier_four_approaches.png', 'Resolution', 300);
+    exportgraphics(fig_h, 'barrier_comparison_with_fixedT_sweep.png', 'Resolution', 300);
 end
 
-%% ===================== Snapshot at t = 5.3: color + line style only =====================
+%% ===================== Single snapshot at t = 5.3 =====================
 for i = 1:numel(res)
     snaps(i) = snapshot_at_time(res(i), t_snap, obs);
 end
@@ -174,8 +207,6 @@ fig_snap = figure('Color','w'); hold on; axis equal; grid on
 xlabel('x [m]'); ylabel('y [m]');
 title(sprintf('Snapshot at t = %.1f s, color + line style', t_snap));
 
-% Obstacle at the requested snapshot time.
-th = linspace(0,2*pi,250);
 c = obs.c_fun(t_snap);
 D = obs.D_fun(t_snap);
 plot(c(1)+D*cos(th), c(2)+D*sin(th), 'k--', 'LineWidth', 1.5, 'HandleVisibility','off');
@@ -183,17 +214,17 @@ plot(goal(1), goal(2), 'kx', 'MarkerSize', 10, 'LineWidth', 2.0, 'HandleVisibili
 
 snap_handles = gobjects(1, numel(res));
 for i = 1:numel(res)
-    % Thin black disturbed / measured path z
+    % Thin black disturbed/measured path z for this approach.
     pz = snaps(i).z_path;
     if ~isempty(pz)
         plot(pz(1,:), pz(2,:), ...
             'LineStyle', line_styles{i}, ...
             'Color', [0 0 0], ...
-            'LineWidth', 0.9, ...
+            'LineWidth', 0.8, ...
             'HandleVisibility', 'off');
     end
 
-    % Main trajectory: color + line style only, no markers and no endpoint shapes
+    % Main path: color + line style only. No markers, no robot shapes.
     p = snaps(i).path;
     snap_handles(i) = plot(p(1,:), p(2,:), ...
         'LineStyle', line_styles{i}, ...
@@ -206,7 +237,7 @@ legend(snap_handles, 'Location', 'eastoutside');
 xlim([0,60]); ylim([0,50]);
 
 if export_figures
-    exportgraphics(fig_snap, 'snapshot_t53_color_linestyle_with_zpaths.png', 'Resolution', 300);
+    exportgraphics(fig_snap, 'snapshot_t53_fixedT_sweep_variableT_with_zpaths.png', 'Resolution', 300);
 end
 
 %% ========================================================================
@@ -875,8 +906,214 @@ function y = clip(x, lo, hi)
 end
 
 %% ========================================================================
-%% Snapshot and plotting helpers
+%% Metric, snapshot, and plotting helpers
 %% ========================================================================
+function res_out = truncate_result_at_time(res, t_stop, obs)
+% Truncate a result structure to t_stop. If t_stop falls inside a held-input
+% interval, the final state and measurement are linearly interpolated and the
+% last sampling interval is shortened for fair control-effort accounting.
+    res_out = res;
+    time = res.time(:).';
+
+    if isempty(time) || time(end) <= t_stop + 1e-12
+        return;
+    end
+
+    X = res.X;
+    Z = res.Z;
+    U = res.U;
+    K = size(U,2);
+
+    idx_pre = find(time <= t_stop, 1, 'last');
+    if isempty(idx_pre)
+        idx_pre = 1;
+    end
+
+    exact_hit = abs(time(idx_pre) - t_stop) <= 1e-12;
+
+    if exact_hit
+        new_time = time(1:idx_pre);
+        new_X = X(:,1:idx_pre);
+        new_Z = Z(:,1:idx_pre);
+        new_K = max(0, idx_pre - 1);
+        new_U = U(:,1:min(new_K,K));
+    else
+        x_stop = interp1(time.', X.', t_stop, 'linear').';
+        z_stop = interp1(time.', Z.', t_stop, 'linear').';
+
+        new_time = [time(1:idx_pre), t_stop];
+        new_X = [X(:,1:idx_pre), x_stop];
+        new_Z = [Z(:,1:idx_pre), z_stop];
+
+        % The update that started at time(idx_pre) is active until t_stop.
+        new_K = min(idx_pre, K);
+        new_U = U(:,1:new_K);
+    end
+
+    new_h = zeros(1, numel(new_time));
+    for j = 1:numel(new_time)
+        new_h(j) = h_tv(new_X(:,j), new_time(j), obs);
+    end
+
+    res_out.X = new_X;
+    res_out.Z = new_Z;
+    res_out.U = new_U;
+    res_out.h = new_h;
+    res_out.time = new_time;
+
+    if isfield(res_out, 'T_log') && ~isempty(res.T_log)
+        Tlog = res.T_log(:).';
+        Tlog = Tlog(1:min(new_K, numel(Tlog)));
+        if ~exact_hit && ~isempty(Tlog)
+            Tlog(end) = t_stop - time(idx_pre);
+        end
+        res_out.T_log = Tlog;
+    end
+
+    if isfield(res_out, 'Tnext_log') && ~isempty(res.Tnext_log)
+        Tnext = res.Tnext_log(:).';
+        res_out.Tnext_log = Tnext(1:min(new_K, numel(Tnext)));
+    end
+
+    if isfield(res_out, 'psi1') && ~isempty(res.psi1)
+        res_out.psi1 = res.psi1(1:min(new_K, numel(res.psi1)));
+    end
+    if isfield(res_out, 'B') && ~isempty(res.B)
+        res_out.B = res.B(1:min(new_K, numel(res.B)));
+    end
+    if isfield(res_out, 'I') && ~isempty(res.I)
+        res_out.I = res.I(1:min(new_K, numel(res.I)));
+    end
+    if isfield(res_out, 'J') && ~isempty(res.J)
+        res_out.J = res.J(1:min(new_K, numel(res.J)));
+    end
+    if isfield(res_out, 'U_delta') && ~isempty(res.U_delta)
+        res_out.U_delta = res.U_delta(:,1:min(new_K, size(res.U_delta,2)));
+    end
+end
+
+function [summary_table, reduction_table] = build_comparison_tables(res, ref_idx, fixed_tv_indices, variable_idx, goal)
+    n = numel(res);
+
+    Approach = cell(n,1);
+    FinalTime_s = zeros(n,1);
+    Updates = zeros(n,1);
+    AvgSampling_s = zeros(n,1);
+    ControlEffort_u2s = zeros(n,1);
+    PathLength_m = zeros(n,1);
+    RMSDevVsFixedT0020_m = zeros(n,1);
+    MinH = zeros(n,1);
+    FinalDistanceToGoal_m = zeros(n,1);
+
+    ref = res(ref_idx);
+    for i = 1:n
+        Approach{i} = res(i).name;
+        FinalTime_s(i) = res(i).time(end);
+        Updates(i) = size(res(i).U,2);
+        AvgSampling_s(i) = average_sampling_interval(res(i));
+        ControlEffort_u2s(i) = control_effort_metric(res(i));
+        PathLength_m(i) = path_length_metric(res(i));
+        RMSDevVsFixedT0020_m(i) = rms_position_deviation(res(i), ref, 0.01);
+        MinH(i) = min(res(i).h);
+        FinalDistanceToGoal_m(i) = norm(res(i).X(1:2,end) - goal(:));
+    end
+
+    summary_table = table(Approach, FinalTime_s, Updates, AvgSampling_s, ...
+        ControlEffort_u2s, PathLength_m, RMSDevVsFixedT0020_m, MinH, FinalDistanceToGoal_m);
+
+    m = numel(fixed_tv_indices);
+    FixedT_s = zeros(m,1);
+    FixedFinalTime_s = zeros(m,1);
+    FixedUpdates = zeros(m,1);
+    VariableFinalTime_s = zeros(m,1);
+    VariableAvgT_s = zeros(m,1);
+    VariableUpdates = zeros(m,1);
+    UpdateReductionPct = zeros(m,1);
+
+    var_updates = size(res(variable_idx).U,2);
+    var_avg_T = average_sampling_interval(res(variable_idx));
+    var_final_time = res(variable_idx).time(end);
+
+    for j = 1:m
+        idx = fixed_tv_indices(j);
+        FixedT_s(j) = average_sampling_interval(res(idx));
+        FixedFinalTime_s(j) = res(idx).time(end);
+        FixedUpdates(j) = size(res(idx).U,2);
+        VariableFinalTime_s(j) = var_final_time;
+        VariableAvgT_s(j) = var_avg_T;
+        VariableUpdates(j) = var_updates;
+        UpdateReductionPct(j) = 100*(1 - VariableUpdates(j)/FixedUpdates(j));
+    end
+
+    reduction_table = table(FixedT_s, FixedFinalTime_s, FixedUpdates, ...
+        VariableFinalTime_s, VariableAvgT_s, VariableUpdates, UpdateReductionPct);
+end
+
+function avgT = average_sampling_interval(res)
+    K = size(res.U,2);
+    if K == 0
+        avgT = NaN;
+        return;
+    end
+
+    if isfield(res, 'T_log') && ~isempty(res.T_log)
+        Tlog = res.T_log(:).';
+        Tlog = Tlog(1:min(K,numel(Tlog)));
+        Tlog = Tlog(~isnan(Tlog));
+        avgT = mean(Tlog);
+    else
+        avgT = (res.time(end) - res.time(1))/K;
+    end
+end
+
+function effort = control_effort_metric(res)
+% Integral-like control effort: sum_k ||u_k||^2 T_k.
+    K = size(res.U,2);
+    if K == 0
+        effort = 0;
+        return;
+    end
+
+    if isfield(res, 'T_log') && ~isempty(res.T_log)
+        Tlog = res.T_log(:).';
+        Tlog = Tlog(1:min(K,numel(Tlog)));
+    else
+        Tlog = diff(res.time);
+    end
+
+    Kuse = min(K, numel(Tlog));
+    effort = sum(sum(res.U(:,1:Kuse).^2, 1) .* Tlog(1:Kuse));
+end
+
+function L = path_length_metric(res)
+    if size(res.X,2) < 2
+        L = 0;
+        return;
+    end
+    dX = diff(res.X(1:2,:), 1, 2);
+    L = sum(sqrt(sum(dX.^2, 1)));
+end
+
+function rms_dev = rms_position_deviation(res, ref, dt_grid)
+% RMS position deviation over the common time interval.
+    t_end = min(res.time(end), ref.time(end));
+    if t_end <= 0
+        rms_dev = 0;
+        return;
+    end
+
+    tq = 0:dt_grid:t_end;
+    if tq(end) < t_end
+        tq = [tq, t_end];
+    end
+
+    p = interp1(res.time(:), res.X(1:2,:).', tq(:), 'linear', 'extrap');
+    pref = interp1(ref.time(:), ref.X(1:2,:).', tq(:), 'linear', 'extrap');
+
+    e2 = sum((p - pref).^2, 2);
+    rms_dev = sqrt(mean(e2));
+end
+
 function snap = snapshot_at_time(res, t_snap, obs)
     time = res.time(:).';
     X = res.X;
@@ -928,30 +1165,3 @@ function snap = snapshot_at_time(res, t_snap, obs)
     snap.path = path;
     snap.z_path = z_path;
 end
-
-function plot_robot_triangle(x, color_rgb, scale, face_alpha)
-    [vx, vy] = triangle_pose(x(1), x(2), x(3), scale);
-    patch(vx, vy, color_rgb, ...
-        'FaceAlpha', face_alpha, ...
-        'EdgeColor', 'k', ...
-        'LineWidth', 0.9, ...
-        'HandleVisibility','off');
-end
-
-function plot_heading_arrow(x, color_rgb)
-    quiver(x(1), x(2), cos(x(3)), sin(x(3)), 1.5, ...
-        'Color', color_rgb, ...
-        'LineWidth', 1.1, ...
-        'MaxHeadSize', 1.5, ...
-        'HandleVisibility','off');
-end
-
-function [vx,vy] = triangle_pose(x, y, th, s)
-    tri = s*[1 0 -0.6;
-             0 0.3 -0.3];
-    R = [cos(th) -sin(th);
-         sin(th)  cos(th)];
-    pts = R*tri + [x; y];
-    vx = pts(1,:);
-    vy = pts(2,:);
-end-
